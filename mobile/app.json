@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "Chat App",
+    "slug": "chat-app-mobile",
+    "version": "1.0.0",
+    "scheme": "chatapp",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Chat App to access your photos so you can choose a profile picture.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ]
+    ],
+    "extra": {
+      "backendHost": ""
+    },
+    "ios": {
+      "bundleIdentifier": "com.atif.chatapp",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.atif.chatapp",
+      "edgeToEdgeEnabled": true
+    }
+  }
+}

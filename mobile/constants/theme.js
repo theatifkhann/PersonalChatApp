@@ -1,0 +1,11 @@
+export const SURFACE = "#111b21";
+export const SURFACE_ELEVATED = "#1f2c34";
+export const SURFACE_MUTED = "#202c33";
+export const BORDER = "#2a3942";
+export const ACCENT = "#25d366";
+export const TEXT_PRIMARY = "#e9edef";
+export const TEXT_SECONDARY = "#8696a0";
+export const BUBBLE_OUTGOING = "#005c4b";
+export const BUBBLE_INCOMING = "#202c33";
+export const BUBBLE_SYSTEM = "#182229";
+export const COMPOSER_DOCK_HEIGHT = 92;

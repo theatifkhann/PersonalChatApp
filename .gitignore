@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.env.*
+backend/.env
+mobile/.env
+mobile/.env.*
+mobile/dist
+mobile/.expo
+mobile/node_modules
+.venv
+__pycache__/
+*.pyc
