@@ -31,5 +31,9 @@ class ConnectionManager:
         await websocket.send_json(dict(payload))
         return True
 
+    async def send_to_many(self, user_ids: set[int], payload: Mapping[str, object]) -> None:
+        for user_id in user_ids:
+            await self.send_to(user_id, payload)
+
 
 manager = ConnectionManager()

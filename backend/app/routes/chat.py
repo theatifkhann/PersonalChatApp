@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
@@ -17,11 +17,16 @@ from ..models import (
     UserSearchResult,
     UserSummary,
 )
+from ..websocket import manager
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 PENDING_STATUS = "pending"
 ACCEPTED_STATUS = "accepted"
+
+
+async def _notify_contacts_changed(user_ids: set[int]) -> None:
+    await manager.send_to_many(user_ids, {"type": "contacts_changed"})
 
 
 def _serialize_user(user: User) -> UserSummary:
@@ -280,6 +285,7 @@ def list_contacts(
 @router.post("/friend-requests", response_model=FriendRequestSummary, status_code=201)
 def create_friend_request(
     payload: FriendRequestCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> FriendRequestSummary:
@@ -323,12 +329,17 @@ def create_friend_request(
     db.add(friendship_request)
     db.commit()
     db.refresh(friendship_request)
+    background_tasks.add_task(
+        _notify_contacts_changed,
+        {current_user.id, payload.receiver_id},
+    )
     return _serialize_friend_request(friendship_request, direction="outgoing", user=receiver)
 
 
 @router.post("/friend-requests/{request_id}/accept", response_model=FriendRequestSummary)
 def accept_friend_request(
     request_id: int,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> FriendRequestSummary:
@@ -351,6 +362,10 @@ def accept_friend_request(
     if requester is None:
         raise HTTPException(status_code=404, detail="User not found.")
 
+    background_tasks.add_task(
+        _notify_contacts_changed,
+        {current_user.id, friendship_request.requester_id},
+    )
     return _serialize_friend_request(friendship_request, direction="incoming", user=requester)
 
 

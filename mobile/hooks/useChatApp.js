@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, Platform } from "react-native";
+import { AppState, Keyboard, Platform } from "react-native";
 
 import chatSocket, {
   getDefaultBackendHost,
@@ -68,6 +68,8 @@ export default function useChatApp() {
   const [friendActionKey, setFriendActionKey] = useState("");
   const currentUserIdRef = useRef(null);
   const selectedUserIdRef = useRef(null);
+  const sessionTokenRef = useRef("");
+  const refreshTimeoutRef = useRef(null);
 
   const selectedUser = useMemo(
     () => availableUsers.find((user) => user.user_id === selectedUserId) || null,
@@ -124,7 +126,16 @@ export default function useChatApp() {
   }, [selectedUserId]);
 
   useEffect(() => {
+    sessionTokenRef.current = sessionToken;
+  }, [sessionToken]);
+
+  useEffect(() => {
     const unsubscribeMessages = chatSocket.onMessage((incomingMessage) => {
+      if (incomingMessage.type === "contacts_changed") {
+        refreshAppData({ quiet: true });
+        return;
+      }
+
       const normalizedMessage = {
         id: incomingMessage.id || `${Date.now()}-${Math.random()}`,
         kind: incomingMessage.type || "incoming",
@@ -156,6 +167,8 @@ export default function useChatApp() {
             (currentCounts[normalizedMessage.senderId] || 0) + 1,
         }));
       }
+
+      refreshAppData({ quiet: true });
     });
 
     const unsubscribeStatus = chatSocket.onStatusChange((nextStatus) => {
@@ -220,7 +233,7 @@ export default function useChatApp() {
       );
       const normalizedHistory = history.map((item) => ({
         id: item.id || `${item.sender_id}-${item.receiver_id}-${item.created_at}`,
-        kind: item.sender_id === currentUser?.user_id ? "outgoing" : "incoming",
+        kind: item.sender_id === currentUserIdRef.current ? "outgoing" : "incoming",
         senderId: item.sender_id,
         receiverId: item.receiver_id,
         text: item.message,
@@ -244,12 +257,14 @@ export default function useChatApp() {
     });
   };
 
-  const loadUsers = async (tokenOverride = sessionToken) => {
+  const loadUsers = async (tokenOverride = sessionToken, options = {}) => {
     if (!tokenOverride) {
       return;
     }
 
-    setRefreshingUsers(true);
+    if (!options.quiet) {
+      setRefreshingUsers(true);
+    }
     try {
       const response = await fetch(`${httpBaseUrl}/chat/contacts`, {
         headers: {
@@ -277,19 +292,35 @@ export default function useChatApp() {
     } catch (requestError) {
       setError(requestError.message);
     } finally {
-      setRefreshingUsers(false);
+      if (!options.quiet) {
+        setRefreshingUsers(false);
+      }
     }
   };
 
-  const loadConversation = async (peerId) => {
-    if (!peerId || !sessionToken) {
+  const loadConversation = async (
+    peerId,
+    tokenOverride = sessionToken,
+    options = {},
+  ) => {
+    if (!peerId || !tokenOverride) {
       return;
     }
 
-    setHistoryLoading(true);
+    if (!options.quiet) {
+      setHistoryLoading(true);
+    }
     setError("");
     try {
-      const history = await authorizedFetch(`/chat/messages?peer_id=${peerId}`);
+      const response = await fetch(`${httpBaseUrl}/chat/messages?peer_id=${peerId}`, {
+        headers: {
+          Authorization: `Bearer ${tokenOverride}`,
+        },
+      });
+      const history = await response.json().catch(() => []);
+      if (!response.ok) {
+        throw new Error(formatApiError(history, "Unable to load messages."));
+      }
       mergeHistory(history);
       setUnreadCounts((currentCounts) => ({
         ...currentCounts,
@@ -298,7 +329,9 @@ export default function useChatApp() {
     } catch (requestError) {
       setError(requestError.message);
     } finally {
-      setHistoryLoading(false);
+      if (!options.quiet) {
+        setHistoryLoading(false);
+      }
     }
   };
 
@@ -307,6 +340,49 @@ export default function useChatApp() {
       loadConversation(selectedUserId);
     }
   }, [selectedUserId]);
+
+  const refreshAppData = useCallback((options = {}) => {
+    if (!sessionTokenRef.current) {
+      return;
+    }
+
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+    }
+
+    refreshTimeoutRef.current = setTimeout(() => {
+      loadUsers(sessionTokenRef.current, options);
+      if (selectedUserIdRef.current) {
+        loadConversation(selectedUserIdRef.current, sessionTokenRef.current, {
+          quiet: true,
+        });
+      }
+    }, options.immediate ? 0 : 300);
+  }, [httpBaseUrl]);
+
+  useEffect(() => {
+    if (!sessionToken) {
+      return undefined;
+    }
+
+    const intervalId = setInterval(() => {
+      refreshAppData({ quiet: true });
+    }, 10000);
+
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        refreshAppData({ quiet: true, immediate: true });
+      }
+    });
+
+    return () => {
+      clearInterval(intervalId);
+      subscription.remove();
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+      }
+    };
+  }, [sessionToken, refreshAppData]);
 
   const sendFriendRequest = async (receiverId) => {
     try {
@@ -322,6 +398,7 @@ export default function useChatApp() {
         }),
       });
       await loadUsers();
+      refreshAppData({ quiet: true, immediate: true });
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -338,6 +415,7 @@ export default function useChatApp() {
       });
       await loadUsers();
       setSelectedUserId(userId);
+      refreshAppData({ quiet: true, immediate: true });
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -473,6 +551,7 @@ export default function useChatApp() {
       setIncomingRequests([]);
       setOutgoingRequests([]);
       setDiscoverableUsers([]);
+      setUserSearchResults([]);
       setSelectedUserId(null);
       setMessages([]);
       setUnreadCounts({});
