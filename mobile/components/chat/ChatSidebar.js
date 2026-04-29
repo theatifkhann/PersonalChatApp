@@ -20,11 +20,11 @@ import {
 import { buildAvatarFallback } from "../../utils/chat";
 
 export default function ChatSidebar({
-  availableUsers,
-  incomingRequests,
-  outgoingRequests,
-  discoverableUsers,
-  userSearchResults,
+  availableUsers = [],
+  incomingRequests = [],
+  outgoingRequests = [],
+  discoverableUsers = [],
+  userSearchResults = [],
   searchingUsers,
   isWideLayout,
   refreshingUsers,
@@ -32,7 +32,7 @@ export default function ChatSidebar({
   setSelectedUserId,
   unreadCounts,
   loadUsers,
-  searchUsers,
+  searchUsers = () => {},
   friendActionKey,
   sendFriendRequest,
   acceptFriendRequest,
