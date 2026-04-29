@@ -3,6 +3,7 @@ node_modules
 dist
 .env
 .env.*
+!.env.example
 npm-debug.*
 yarn-debug.*
 yarn-error.*

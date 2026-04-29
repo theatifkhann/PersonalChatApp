@@ -1,9 +1,13 @@
 .DS_Store
 .env
 .env.*
+!.env.example
 backend/.env
+!backend/.env.example
+backend/*.db
 mobile/.env
 mobile/.env.*
+!mobile/.env.example
 mobile/dist
 mobile/.expo
 mobile/node_modules

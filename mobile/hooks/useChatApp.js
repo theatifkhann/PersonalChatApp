@@ -11,6 +11,34 @@ import chatSocket, {
 import { COMPOSER_DOCK_HEIGHT } from "../constants/theme";
 import { pickProfileImageFromLibrary } from "../services/imagePicker";
 
+const USERNAME_PATTERN = /^[a-z0-9_]{3,24}$/;
+
+function formatApiError(data, fallbackMessage = "Request failed.") {
+  const detail = data?.detail;
+
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+
+        const location = Array.isArray(item?.loc)
+          ? item.loc.filter((part) => part !== "body").join(".")
+          : "";
+        const message = item?.msg || fallbackMessage;
+        return location ? `${location}: ${message}` : message;
+      })
+      .join("\n");
+  }
+
+  return fallbackMessage;
+}
+
 export default function useChatApp() {
   const [authMode, setAuthMode] = useState("login");
   const [email, setEmail] = useState("");
@@ -177,7 +205,7 @@ export default function useChatApp() {
 
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(data.detail || "Request failed.");
+      throw new Error(formatApiError(data));
     }
 
     return data;
@@ -228,7 +256,7 @@ export default function useChatApp() {
       });
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.detail || "Unable to load users.");
+        throw new Error(formatApiError(data, "Unable to load users."));
       }
 
       setAvailableUsers(data.friends || []);
@@ -316,7 +344,10 @@ export default function useChatApp() {
   };
 
   const handleAuth = async () => {
-    if (!email.trim()) {
+    const cleanedEmail = email.trim().toLowerCase();
+    const cleanedUsername = username.trim().toLowerCase();
+
+    if (!cleanedEmail) {
       setError("Enter your email address.");
       return;
     }
@@ -324,8 +355,16 @@ export default function useChatApp() {
       setError("Enter your password.");
       return;
     }
-    if (authMode === "signup" && !username.trim()) {
+    if (authMode === "signup" && !cleanedUsername) {
       setError("Choose a username.");
+      return;
+    }
+    if (authMode === "signup" && !USERNAME_PATTERN.test(cleanedUsername)) {
+      setError("Username must be 3-24 chars using lowercase letters, numbers, or underscores.");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
       return;
     }
 
@@ -341,13 +380,13 @@ export default function useChatApp() {
         body: JSON.stringify(
           authMode === "signup"
             ? {
-                email,
-                username,
+                email: cleanedEmail,
+                username: cleanedUsername,
                 password,
                 avatar_url: avatarUrl || null,
               }
             : {
-                email,
+                email: cleanedEmail,
                 password,
               },
         ),
@@ -355,7 +394,7 @@ export default function useChatApp() {
 
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.detail || "Unable to connect.");
+        throw new Error(formatApiError(data, "Unable to connect."));
       }
 
       setCurrentUser(data.user);
