@@ -113,6 +113,11 @@ class UserSummary(BaseModel):
     created_at: datetime
 
 
+class UserSearchResult(UserSummary):
+    relationship: str
+    request_id: int | None = None
+
+
 class FriendRequestCreate(BaseModel):
     receiver_id: int = Field(..., ge=1)
 

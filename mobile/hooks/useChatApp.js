@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Keyboard, Platform } from "react-native";
 
 import chatSocket, {
@@ -53,6 +53,8 @@ export default function useChatApp() {
   const [incomingRequests, setIncomingRequests] = useState([]);
   const [outgoingRequests, setOutgoingRequests] = useState([]);
   const [discoverableUsers, setDiscoverableUsers] = useState([]);
+  const [userSearchResults, setUserSearchResults] = useState([]);
+  const [searchingUsers, setSearchingUsers] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
@@ -343,6 +345,28 @@ export default function useChatApp() {
     }
   };
 
+  const searchUsers = useCallback(async (query) => {
+    const cleanedQuery = query.trim().toLowerCase();
+    if (!cleanedQuery) {
+      setUserSearchResults([]);
+      return;
+    }
+
+    try {
+      setSearchingUsers(true);
+      setError("");
+      const results = await authorizedFetch(
+        `/chat/users/search?username=${encodeURIComponent(cleanedQuery)}`,
+      );
+      setUserSearchResults(results || []);
+    } catch (requestError) {
+      setUserSearchResults([]);
+      setError(requestError.message);
+    } finally {
+      setSearchingUsers(false);
+    }
+  }, [sessionToken, httpBaseUrl]);
+
   const handleAuth = async () => {
     const cleanedEmail = email.trim().toLowerCase();
     const cleanedUsername = username.trim().toLowerCase();
@@ -519,6 +543,8 @@ export default function useChatApp() {
     incomingRequests,
     outgoingRequests,
     discoverableUsers,
+    userSearchResults,
+    searchingUsers,
     selectedUserId,
     setSelectedUserId,
     selectedUser,
@@ -538,6 +564,7 @@ export default function useChatApp() {
     clearAvatar,
     logout,
     loadUsers,
+    searchUsers,
     sendFriendRequest,
     acceptFriendRequest,
     sendMessage,

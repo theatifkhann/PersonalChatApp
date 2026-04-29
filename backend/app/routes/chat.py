@@ -14,6 +14,7 @@ from ..models import (
     ContactsResponse,
     FriendRequestCreate,
     FriendRequestSummary,
+    UserSearchResult,
     UserSummary,
 )
 
@@ -29,6 +30,22 @@ def _serialize_user(user: User) -> UserSummary:
         username=user.username,
         avatar_url=user.avatar_url,
         created_at=user.created_at,
+    )
+
+
+def _serialize_search_result(
+    user: User,
+    *,
+    relationship: str,
+    request_id: int | None = None,
+) -> UserSearchResult:
+    return UserSearchResult(
+        user_id=user.id,
+        username=user.username,
+        avatar_url=user.avatar_url,
+        created_at=user.created_at,
+        relationship=relationship,
+        request_id=request_id,
     )
 
 
@@ -73,6 +90,56 @@ def are_friends(db: Session, user_id: int, peer_id: int) -> bool:
         ),
     )
     return db.scalar(statement) is not None
+
+
+def _friendship_by_user_id(
+    db: Session,
+    current_user_id: int,
+    user_ids: list[int],
+) -> dict[int, FriendshipRequest]:
+    if not user_ids:
+        return {}
+
+    friendship_requests = db.scalars(
+        select(FriendshipRequest).where(
+            or_(
+                and_(
+                    FriendshipRequest.requester_id == current_user_id,
+                    FriendshipRequest.receiver_id.in_(user_ids),
+                ),
+                and_(
+                    FriendshipRequest.receiver_id == current_user_id,
+                    FriendshipRequest.requester_id.in_(user_ids),
+                ),
+            )
+        )
+    ).all()
+
+    return {
+        (
+            friendship_request.receiver_id
+            if friendship_request.requester_id == current_user_id
+            else friendship_request.requester_id
+        ): friendship_request
+        for friendship_request in friendship_requests
+    }
+
+
+def _relationship_for_request(
+    friendship_request: FriendshipRequest | None,
+    current_user_id: int,
+) -> str:
+    if friendship_request is None:
+        return "discoverable"
+    if friendship_request.status == ACCEPTED_STATUS:
+        return "friend"
+    if friendship_request.status == PENDING_STATUS:
+        return (
+            "incoming"
+            if friendship_request.receiver_id == current_user_id
+            else "outgoing"
+        )
+    return friendship_request.status
 
 
 def _build_contacts_response(db: Session, current_user: User) -> ContactsResponse:
@@ -159,6 +226,47 @@ def list_users(
     if exclude_user_id:
         users = [user for user in users if user.user_id != exclude_user_id]
     return users
+
+
+@router.get("/users/search", response_model=list[UserSearchResult])
+def search_users(
+    username: str = Query(..., min_length=1, max_length=24),
+    limit: int = Query(default=20, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[UserSearchResult]:
+    normalized_username = username.strip().casefold()
+    if not normalized_username:
+        return []
+
+    users = db.scalars(
+        select(User)
+        .where(
+            User.id != current_user.id,
+            User.username.ilike(f"%{normalized_username}%"),
+        )
+        .order_by(User.username.asc())
+        .limit(limit)
+    ).all()
+    friendships_by_user_id = _friendship_by_user_id(
+        db,
+        current_user.id,
+        [user.id for user in users],
+    )
+
+    return [
+        _serialize_search_result(
+            user,
+            relationship=_relationship_for_request(
+                friendships_by_user_id.get(user.id),
+                current_user.id,
+            ),
+            request_id=friendships_by_user_id.get(user.id).id
+            if friendships_by_user_id.get(user.id)
+            else None,
+        )
+        for user in users
+    ]
 
 
 @router.get("/contacts", response_model=ContactsResponse)
