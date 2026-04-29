@@ -2,7 +2,7 @@ services:
   - type: web
     name: chat-app-api
     runtime: python
-    plan: starter
+    plan: free
     region: oregon
     buildCommand: pip install -r backend/requirements.txt
     startCommand: uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port $PORT
@@ -17,5 +17,5 @@ services:
 
 databases:
   - name: chat-app-db
-    plan: basic-256mb
+    plan: free
     region: oregon
