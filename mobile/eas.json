@@ -6,10 +6,21 @@
   "build": {
     "preview": {
       "distribution": "internal",
-      "developmentClient": false
+      "developmentClient": false,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://chat-app-api-3p5e.onrender.com",
+        "EXPO_PUBLIC_WS_URL": "wss://chat-app-api-3p5e.onrender.com"
+      },
+      "android": {
+        "buildType": "apk"
+      }
     },
     "production": {
-      "autoIncrement": false
+      "autoIncrement": false,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://chat-app-api-3p5e.onrender.com",
+        "EXPO_PUBLIC_WS_URL": "wss://chat-app-api-3p5e.onrender.com"
+      }
     }
   },
   "submit": {

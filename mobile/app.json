@@ -23,7 +23,10 @@
       ]
     ],
     "extra": {
-      "backendHost": ""
+      "backendHost": "",
+      "eas": {
+        "projectId": "5c084d4e-3665-4c71-80ad-e2c4ff7a2087"
+      }
     },
     "ios": {
       "bundleIdentifier": "com.atif.chatapp",
