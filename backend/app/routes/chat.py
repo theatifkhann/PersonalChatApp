@@ -62,6 +62,7 @@ def _serialize_message(message: Message) -> ChatOutboundMessage:
         message=message.body,
         created_at=message.created_at,
         delivered_at=message.delivered_at,
+        read_at=message.read_at,
     )
 
 
@@ -95,6 +96,27 @@ def are_friends(db: Session, user_id: int, peer_id: int) -> bool:
         ),
     )
     return db.scalar(statement) is not None
+
+
+def accepted_friend_ids(db: Session, user_id: int) -> set[int]:
+    friendship_requests = db.scalars(
+        select(FriendshipRequest).where(
+            FriendshipRequest.status == ACCEPTED_STATUS,
+            or_(
+                FriendshipRequest.requester_id == user_id,
+                FriendshipRequest.receiver_id == user_id,
+            ),
+        )
+    ).all()
+
+    return {
+        (
+            friendship_request.receiver_id
+            if friendship_request.requester_id == user_id
+            else friendship_request.requester_id
+        )
+        for friendship_request in friendship_requests
+    }
 
 
 def _friendship_by_user_id(
@@ -398,3 +420,47 @@ def list_messages(
 
     messages = list(reversed(db.scalars(statement).all()))
     return [_serialize_message(message) for message in messages]
+
+
+@router.post("/messages/read")
+async def mark_messages_read(
+    peer_id: int = Query(..., ge=1),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    if not are_friends(db, current_user.id, peer_id):
+        raise HTTPException(status_code=403, detail="You can only read messages from accepted friends.")
+
+    read_at = datetime.now(timezone.utc)
+    unread_messages = db.scalars(
+        select(Message).where(
+            Message.sender_id == peer_id,
+            Message.receiver_id == current_user.id,
+            Message.read_at.is_(None),
+        )
+    ).all()
+
+    message_ids: list[int] = []
+    for message in unread_messages:
+        message.read_at = read_at
+        if message.delivered_at is None:
+            message.delivered_at = read_at
+        message_ids.append(message.id)
+
+    if unread_messages:
+        db.commit()
+        await manager.send_to(
+            peer_id,
+            {
+                "type": "messages_read",
+                "reader_id": current_user.id,
+                "peer_id": peer_id,
+                "message_ids": message_ids,
+                "read_at": read_at.isoformat(),
+            },
+        )
+
+    return {
+        "message_ids": message_ids,
+        "read_at": read_at.isoformat(),
+    }

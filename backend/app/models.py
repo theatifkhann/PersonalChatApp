@@ -83,6 +83,7 @@ class AuthResponse(BaseModel):
 class ChatInboundMessage(BaseModel):
     receiver_id: int = Field(..., ge=1)
     message: str = Field(..., min_length=1, max_length=1000)
+    client_message_id: str | None = Field(default=None, max_length=128)
 
     @field_validator("message")
     @classmethod
@@ -102,6 +103,7 @@ class ChatOutboundMessage(BaseModel):
     message: str
     created_at: datetime | None = None
     delivered_at: datetime | None = None
+    read_at: datetime | None = None
 
 
 class UserSummary(BaseModel):

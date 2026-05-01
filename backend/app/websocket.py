@@ -23,6 +23,9 @@ class ConnectionManager:
     def is_connected(self, user_id: int) -> bool:
         return user_id in self._active_connections
 
+    def connected_user_ids(self, user_ids: set[int]) -> set[int]:
+        return user_ids.intersection(self._active_connections)
+
     async def send_to(self, user_id: int, payload: Mapping[str, object]) -> bool:
         websocket = self._active_connections.get(user_id)
         if websocket is None:

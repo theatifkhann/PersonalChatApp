@@ -57,6 +57,7 @@ export default function useChatApp() {
   const [searchingUsers, setSearchingUsers] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [onlineUserIds, setOnlineUserIds] = useState(new Set());
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [error, setError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -129,6 +130,43 @@ export default function useChatApp() {
     sessionTokenRef.current = sessionToken;
   }, [sessionToken]);
 
+  const normalizeServerMessage = useCallback((payload, fallbackKind = "incoming") => {
+    const senderId = payload.sender_id || null;
+    return {
+      id: payload.id || `${senderId}-${payload.receiver_id}-${payload.created_at || Date.now()}`,
+      kind: senderId === currentUserIdRef.current ? "outgoing" : fallbackKind,
+      senderId,
+      receiverId: payload.receiver_id || null,
+      text: payload.message,
+      createdAt: payload.created_at || new Date().toISOString(),
+      deliveredAt: payload.delivered_at || null,
+      readAt: payload.read_at || null,
+      pending: false,
+    };
+  }, []);
+
+  const mergeMessage = useCallback((nextMessage, clientMessageId = null) => {
+    setMessages((currentMessages) => {
+      const existingIndex = currentMessages.findIndex(
+        (item) =>
+          (nextMessage.id && item.id === nextMessage.id) ||
+          (clientMessageId && item.clientMessageId === clientMessageId),
+      );
+
+      if (existingIndex === -1) {
+        return [...currentMessages, nextMessage];
+      }
+
+      const mergedMessages = [...currentMessages];
+      mergedMessages[existingIndex] = {
+        ...mergedMessages[existingIndex],
+        ...nextMessage,
+        clientMessageId: mergedMessages[existingIndex].clientMessageId || clientMessageId,
+      };
+      return mergedMessages;
+    });
+  }, []);
+
   useEffect(() => {
     const unsubscribeMessages = chatSocket.onMessage((incomingMessage) => {
       if (incomingMessage.type === "contacts_changed") {
@@ -136,25 +174,43 @@ export default function useChatApp() {
         return;
       }
 
-      const normalizedMessage = {
-        id: incomingMessage.id || `${Date.now()}-${Math.random()}`,
-        kind: incomingMessage.type || "incoming",
-        senderId: incomingMessage.sender_id || null,
-        receiverId: incomingMessage.receiver_id || null,
-        text: incomingMessage.message,
-        createdAt: incomingMessage.created_at || new Date().toISOString(),
-      };
+      if (incomingMessage.type === "presence") {
+        setOnlineUserIds((currentIds) => {
+          const nextIds = new Set(currentIds);
+          if (incomingMessage.online) {
+            nextIds.add(incomingMessage.user_id);
+          } else {
+            nextIds.delete(incomingMessage.user_id);
+          }
+          return nextIds;
+        });
+        return;
+      }
 
-      setMessages((currentMessages) => {
-        if (
-          incomingMessage.id &&
-          currentMessages.some((item) => item.id === incomingMessage.id)
-        ) {
-          return currentMessages;
-        }
+      if (incomingMessage.type === "messages_read") {
+        setMessages((currentMessages) =>
+          currentMessages.map((item) =>
+            incomingMessage.message_ids?.includes(item.id)
+              ? {
+                  ...item,
+                  deliveredAt: item.deliveredAt || incomingMessage.read_at,
+                  readAt: incomingMessage.read_at,
+                }
+              : item,
+          ),
+        );
+        return;
+      }
 
-        return [...currentMessages, normalizedMessage];
-      });
+      const messagePayload =
+        typeof incomingMessage.message === "object"
+          ? incomingMessage.message
+          : incomingMessage;
+      const normalizedMessage = normalizeServerMessage(
+        messagePayload,
+        incomingMessage.type || "incoming",
+      );
+      mergeMessage(normalizedMessage, incomingMessage.client_message_id);
 
       if (
         normalizedMessage.senderId &&
@@ -166,6 +222,14 @@ export default function useChatApp() {
           [normalizedMessage.senderId]:
             (currentCounts[normalizedMessage.senderId] || 0) + 1,
         }));
+      }
+
+      if (
+        normalizedMessage.senderId &&
+        normalizedMessage.senderId === selectedUserIdRef.current &&
+        normalizedMessage.receiverId === currentUserIdRef.current
+      ) {
+        markConversationRead(normalizedMessage.senderId, sessionTokenRef.current);
       }
 
       refreshAppData({ quiet: true });
@@ -180,7 +244,7 @@ export default function useChatApp() {
       unsubscribeStatus();
       chatSocket.disconnect();
     };
-  }, []);
+  }, [mergeMessage, normalizeServerMessage]);
 
   useEffect(() => {
     const showEvent =
@@ -238,6 +302,9 @@ export default function useChatApp() {
         receiverId: item.receiver_id,
         text: item.message,
         createdAt: item.created_at,
+        deliveredAt: item.delivered_at || null,
+        readAt: item.read_at || null,
+        pending: false,
       }));
 
       const merged = [...preservedNonConversation];
@@ -322,6 +389,7 @@ export default function useChatApp() {
         throw new Error(formatApiError(history, "Unable to load messages."));
       }
       mergeHistory(history);
+      await markConversationRead(peerId, tokenOverride);
       setUnreadCounts((currentCounts) => ({
         ...currentCounts,
         [peerId]: 0,
@@ -332,6 +400,40 @@ export default function useChatApp() {
       if (!options.quiet) {
         setHistoryLoading(false);
       }
+    }
+  };
+
+  const markConversationRead = async (peerId, tokenOverride = sessionToken) => {
+    if (!peerId || !tokenOverride) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${httpBaseUrl}/chat/messages/read?peer_id=${peerId}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokenOverride}`,
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(formatApiError(data, "Unable to mark messages read."));
+      }
+      if (data.message_ids?.length) {
+        setMessages((currentMessages) =>
+          currentMessages.map((item) =>
+            data.message_ids.includes(item.id)
+              ? {
+                  ...item,
+                  deliveredAt: item.deliveredAt || data.read_at,
+                  readAt: data.read_at,
+                }
+              : item,
+          ),
+        );
+      }
+    } catch {
+      // Read receipts are best-effort; message loading should not fail because of them.
     }
   };
 
@@ -554,6 +656,7 @@ export default function useChatApp() {
       setUserSearchResults([]);
       setSelectedUserId(null);
       setMessages([]);
+      setOnlineUserIds(new Set());
       setUnreadCounts({});
       setConnectionStatus("disconnected");
       setError("");
@@ -581,18 +684,23 @@ export default function useChatApp() {
 
     try {
       setError("");
-      chatSocket.sendMessage(selectedUserId, trimmedMessage);
+      const clientMessageId = `${Date.now()}-${Math.random()}`;
       setMessages((currentMessages) => [
         ...currentMessages,
         {
-          id: `${Date.now()}-${Math.random()}`,
+          id: clientMessageId,
+          clientMessageId,
           kind: "outgoing",
           senderId: currentUser.user_id,
           receiverId: selectedUserId,
           text: trimmedMessage,
           createdAt: new Date().toISOString(),
+          deliveredAt: null,
+          readAt: null,
+          pending: true,
         },
       ]);
+      chatSocket.sendMessage(selectedUserId, trimmedMessage, clientMessageId);
       setMessage("");
     } catch (socketError) {
       setError(socketError.message);
@@ -618,6 +726,7 @@ export default function useChatApp() {
     setMessage,
     currentUser,
     sessionToken,
+    messages,
     availableUsers,
     incomingRequests,
     outgoingRequests,
@@ -634,6 +743,7 @@ export default function useChatApp() {
     historyLoading,
     refreshingUsers,
     unreadCounts,
+    onlineUserIds,
     keyboardHeight,
     isPickingAvatar,
     friendActionKey,
