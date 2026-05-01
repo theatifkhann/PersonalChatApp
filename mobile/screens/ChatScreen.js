@@ -1,18 +1,40 @@
-import React from "react";
-import { useWindowDimensions } from "react-native";
+import React, { useEffect, useState } from "react";
 
 import useChatApp from "../hooks/useChatApp";
-import AuthenticationScreen from "./AuthenticationScreen";
-import ChatHomeScreen from "./ChatHomeScreen";
+import LoginScreen from "./auth/LoginScreen";
+import RegisterScreen from "./auth/RegisterScreen";
+import SplashScreen from "./auth/SplashScreen";
+import MainAppScreen from "./main/MainAppScreen";
 
 export default function ChatScreen() {
-  const { width } = useWindowDimensions();
-  const isWideLayout = width >= 860;
+  const [showSplash, setShowSplash] = useState(true);
   const chatApp = useChatApp();
 
-  if (!chatApp.currentUser) {
-    return <AuthenticationScreen {...chatApp} />;
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      setShowSplash(false);
+    }, 1200);
+
+    return () => clearTimeout(timeoutId);
+  }, []);
+
+  if (showSplash) {
+    return <SplashScreen />;
   }
 
-  return <ChatHomeScreen {...chatApp} isWideLayout={isWideLayout} />;
+  if (!chatApp.currentUser) {
+    const AuthComponent = chatApp.authMode === "signup" ? RegisterScreen : LoginScreen;
+
+    return (
+      <AuthComponent
+        {...chatApp}
+        mode={chatApp.authMode}
+        onSwitchMode={() =>
+          chatApp.setAuthMode(chatApp.authMode === "signup" ? "login" : "signup")
+        }
+      />
+    );
+  }
+
+  return <MainAppScreen chatApp={chatApp} />;
 }

@@ -2,7 +2,7 @@ services:
   - type: web
     name: chat-app-api
     runtime: python
-    plan: starter
+    plan: free
     region: oregon
     buildCommand: pip install -r backend/requirements.txt
     startCommand: uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port $PORT
@@ -13,9 +13,9 @@ services:
           name: chat-app-db
           property: connectionString
       - key: CORS_ALLOW_ORIGINS
-        value: https://chat-app-web.example.com
+        value: "*"
 
 databases:
   - name: chat-app-db
-    plan: basic-256mb
+    plan: free
     region: oregon

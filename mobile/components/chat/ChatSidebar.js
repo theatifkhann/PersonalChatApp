@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Image,
   Pressable,
@@ -20,22 +20,35 @@ import {
 import { buildAvatarFallback } from "../../utils/chat";
 
 export default function ChatSidebar({
-  availableUsers,
-  incomingRequests,
-  outgoingRequests,
-  discoverableUsers,
+  availableUsers = [],
+  incomingRequests = [],
+  outgoingRequests = [],
+  discoverableUsers = [],
+  userSearchResults = [],
+  searchingUsers,
   isWideLayout,
   refreshingUsers,
   selectedUserId,
   setSelectedUserId,
   unreadCounts,
   loadUsers,
+  searchUsers = () => {},
   friendActionKey,
   sendFriendRequest,
   acceptFriendRequest,
 }) {
   const [searchQuery, setSearchQuery] = useState("");
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      searchUsers(normalizedSearchQuery);
+    }, 300);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [normalizedSearchQuery, searchUsers]);
 
   const matchesUsername = (username) => {
     if (!normalizedSearchQuery) {
@@ -61,11 +74,35 @@ export default function ChatSidebar({
     () => discoverableUsers.filter((user) => matchesUsername(user.username)),
     [discoverableUsers, normalizedSearchQuery],
   );
+  const searchResultIds = useMemo(
+    () => new Set(userSearchResults.map((user) => user.user_id)),
+    [userSearchResults],
+  );
+  const discoverList = normalizedSearchQuery
+    ? userSearchResults
+    : filteredDiscoverableUsers;
+  const additionalDiscoverableUsers = normalizedSearchQuery
+    ? filteredDiscoverableUsers.filter((user) => !searchResultIds.has(user.user_id))
+    : [];
+  const discoverResults = [...discoverList, ...additionalDiscoverableUsers];
   const hasSearchResults =
     filteredIncomingRequests.length > 0 ||
     filteredOutgoingRequests.length > 0 ||
     filteredFriends.length > 0 ||
-    filteredDiscoverableUsers.length > 0;
+    discoverResults.length > 0;
+
+  const relationshipLabel = (relationship) => {
+    if (relationship === "friend") {
+      return "Friend";
+    }
+    if (relationship === "incoming") {
+      return "Wants to connect";
+    }
+    if (relationship === "outgoing") {
+      return "Request sent";
+    }
+    return "User";
+  };
 
   return (
     <View style={[styles.sidebar, !isWideLayout ? styles.sidebarStacked : null]}>
@@ -200,30 +237,62 @@ export default function ChatSidebar({
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Discover</Text>
-        {filteredDiscoverableUsers.length === 0 ? (
+        {searchingUsers ? (
+          <Text style={styles.emptyDiscoverText}>Searching...</Text>
+        ) : discoverResults.length === 0 ? (
           <Text style={styles.emptyDiscoverText}>
             {normalizedSearchQuery
               ? "No users match that username."
               : "No new people to add right now."}
           </Text>
         ) : (
-          filteredDiscoverableUsers.map((user) => (
+          discoverResults.map((user) => {
+            const relationship = user.relationship || "discoverable";
+            const isFriend = relationship === "friend";
+            const isIncoming = relationship === "incoming";
+            const isOutgoing = relationship === "outgoing";
+
+            return (
             <View key={user.user_id} style={styles.requestCard}>
               <View style={styles.requestMeta}>
                 <Text style={styles.contactName}>@{user.username}</Text>
-                <Text style={styles.contactSubtext}>User #{user.user_id}</Text>
-              </View>
-              <Pressable
-                disabled={friendActionKey === `send-${user.user_id}`}
-                onPress={() => sendFriendRequest(user.user_id)}
-                style={styles.actionButtonSecondary}
-              >
-                <Text style={styles.actionButtonTextSecondary}>
-                  {friendActionKey === `send-${user.user_id}` ? "Sending..." : "Add"}
+                <Text style={styles.contactSubtext}>
+                  {relationshipLabel(relationship)} #{user.user_id}
                 </Text>
-              </Pressable>
+              </View>
+              {isFriend ? (
+                <Pressable
+                  onPress={() => setSelectedUserId(user.user_id)}
+                  style={styles.actionButtonSecondary}
+                >
+                  <Text style={styles.actionButtonTextSecondary}>Open</Text>
+                </Pressable>
+              ) : isIncoming ? (
+                <Pressable
+                  disabled={friendActionKey === `accept-${user.request_id}`}
+                  onPress={() => acceptFriendRequest(user.request_id, user.user_id)}
+                  style={styles.actionButton}
+                >
+                  <Text style={styles.actionButtonText}>
+                    {friendActionKey === `accept-${user.request_id}` ? "Accepting..." : "Accept"}
+                  </Text>
+                </Pressable>
+              ) : isOutgoing ? (
+                <Text style={styles.pendingBadge}>Pending</Text>
+              ) : (
+                <Pressable
+                  disabled={friendActionKey === `send-${user.user_id}`}
+                  onPress={() => sendFriendRequest(user.user_id)}
+                  style={styles.actionButtonSecondary}
+                >
+                  <Text style={styles.actionButtonTextSecondary}>
+                    {friendActionKey === `send-${user.user_id}` ? "Sending..." : "Add"}
+                  </Text>
+                </Pressable>
+              )}
             </View>
-          ))
+          );
+          })
         )}
       </View>
     </View>

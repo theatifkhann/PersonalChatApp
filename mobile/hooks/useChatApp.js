@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, Platform } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AppState, Keyboard, Platform } from "react-native";
 
 import chatSocket, {
   getDefaultBackendHost,
@@ -10,6 +10,34 @@ import chatSocket, {
 } from "../services/socket";
 import { COMPOSER_DOCK_HEIGHT } from "../constants/theme";
 import { pickProfileImageFromLibrary } from "../services/imagePicker";
+
+const USERNAME_PATTERN = /^[a-z0-9_]{3,24}$/;
+
+function formatApiError(data, fallbackMessage = "Request failed.") {
+  const detail = data?.detail;
+
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+
+        const location = Array.isArray(item?.loc)
+          ? item.loc.filter((part) => part !== "body").join(".")
+          : "";
+        const message = item?.msg || fallbackMessage;
+        return location ? `${location}: ${message}` : message;
+      })
+      .join("\n");
+  }
+
+  return fallbackMessage;
+}
 
 export default function useChatApp() {
   const [authMode, setAuthMode] = useState("login");
@@ -25,8 +53,11 @@ export default function useChatApp() {
   const [incomingRequests, setIncomingRequests] = useState([]);
   const [outgoingRequests, setOutgoingRequests] = useState([]);
   const [discoverableUsers, setDiscoverableUsers] = useState([]);
+  const [userSearchResults, setUserSearchResults] = useState([]);
+  const [searchingUsers, setSearchingUsers] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [onlineUserIds, setOnlineUserIds] = useState(new Set());
   const [connectionStatus, setConnectionStatus] = useState("disconnected");
   const [error, setError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -38,6 +69,8 @@ export default function useChatApp() {
   const [friendActionKey, setFriendActionKey] = useState("");
   const currentUserIdRef = useRef(null);
   const selectedUserIdRef = useRef(null);
+  const sessionTokenRef = useRef("");
+  const refreshTimeoutRef = useRef(null);
 
   const selectedUser = useMemo(
     () => availableUsers.find((user) => user.user_id === selectedUserId) || null,
@@ -94,26 +127,90 @@ export default function useChatApp() {
   }, [selectedUserId]);
 
   useEffect(() => {
-    const unsubscribeMessages = chatSocket.onMessage((incomingMessage) => {
-      const normalizedMessage = {
-        id: incomingMessage.id || `${Date.now()}-${Math.random()}`,
-        kind: incomingMessage.type || "incoming",
-        senderId: incomingMessage.sender_id || null,
-        receiverId: incomingMessage.receiver_id || null,
-        text: incomingMessage.message,
-        createdAt: incomingMessage.created_at || new Date().toISOString(),
+    sessionTokenRef.current = sessionToken;
+  }, [sessionToken]);
+
+  const normalizeServerMessage = useCallback((payload, fallbackKind = "incoming") => {
+    const senderId = payload.sender_id || null;
+    return {
+      id: payload.id || `${senderId}-${payload.receiver_id}-${payload.created_at || Date.now()}`,
+      kind: senderId === currentUserIdRef.current ? "outgoing" : fallbackKind,
+      senderId,
+      receiverId: payload.receiver_id || null,
+      text: payload.message,
+      createdAt: payload.created_at || new Date().toISOString(),
+      deliveredAt: payload.delivered_at || null,
+      readAt: payload.read_at || null,
+      pending: false,
+    };
+  }, []);
+
+  const mergeMessage = useCallback((nextMessage, clientMessageId = null) => {
+    setMessages((currentMessages) => {
+      const existingIndex = currentMessages.findIndex(
+        (item) =>
+          (nextMessage.id && item.id === nextMessage.id) ||
+          (clientMessageId && item.clientMessageId === clientMessageId),
+      );
+
+      if (existingIndex === -1) {
+        return [...currentMessages, nextMessage];
+      }
+
+      const mergedMessages = [...currentMessages];
+      mergedMessages[existingIndex] = {
+        ...mergedMessages[existingIndex],
+        ...nextMessage,
+        clientMessageId: mergedMessages[existingIndex].clientMessageId || clientMessageId,
       };
+      return mergedMessages;
+    });
+  }, []);
 
-      setMessages((currentMessages) => {
-        if (
-          incomingMessage.id &&
-          currentMessages.some((item) => item.id === incomingMessage.id)
-        ) {
-          return currentMessages;
-        }
+  useEffect(() => {
+    const unsubscribeMessages = chatSocket.onMessage((incomingMessage) => {
+      if (incomingMessage.type === "contacts_changed") {
+        refreshAppData({ quiet: true });
+        return;
+      }
 
-        return [...currentMessages, normalizedMessage];
-      });
+      if (incomingMessage.type === "presence") {
+        setOnlineUserIds((currentIds) => {
+          const nextIds = new Set(currentIds);
+          if (incomingMessage.online) {
+            nextIds.add(incomingMessage.user_id);
+          } else {
+            nextIds.delete(incomingMessage.user_id);
+          }
+          return nextIds;
+        });
+        return;
+      }
+
+      if (incomingMessage.type === "messages_read") {
+        setMessages((currentMessages) =>
+          currentMessages.map((item) =>
+            incomingMessage.message_ids?.includes(item.id)
+              ? {
+                  ...item,
+                  deliveredAt: item.deliveredAt || incomingMessage.read_at,
+                  readAt: incomingMessage.read_at,
+                }
+              : item,
+          ),
+        );
+        return;
+      }
+
+      const messagePayload =
+        typeof incomingMessage.message === "object"
+          ? incomingMessage.message
+          : incomingMessage;
+      const normalizedMessage = normalizeServerMessage(
+        messagePayload,
+        incomingMessage.type || "incoming",
+      );
+      mergeMessage(normalizedMessage, incomingMessage.client_message_id);
 
       if (
         normalizedMessage.senderId &&
@@ -126,6 +223,16 @@ export default function useChatApp() {
             (currentCounts[normalizedMessage.senderId] || 0) + 1,
         }));
       }
+
+      if (
+        normalizedMessage.senderId &&
+        normalizedMessage.senderId === selectedUserIdRef.current &&
+        normalizedMessage.receiverId === currentUserIdRef.current
+      ) {
+        markConversationRead(normalizedMessage.senderId, sessionTokenRef.current);
+      }
+
+      refreshAppData({ quiet: true });
     });
 
     const unsubscribeStatus = chatSocket.onStatusChange((nextStatus) => {
@@ -137,7 +244,7 @@ export default function useChatApp() {
       unsubscribeStatus();
       chatSocket.disconnect();
     };
-  }, []);
+  }, [mergeMessage, normalizeServerMessage]);
 
   useEffect(() => {
     const showEvent =
@@ -177,7 +284,7 @@ export default function useChatApp() {
 
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(data.detail || "Request failed.");
+      throw new Error(formatApiError(data));
     }
 
     return data;
@@ -190,11 +297,14 @@ export default function useChatApp() {
       );
       const normalizedHistory = history.map((item) => ({
         id: item.id || `${item.sender_id}-${item.receiver_id}-${item.created_at}`,
-        kind: item.sender_id === currentUser?.user_id ? "outgoing" : "incoming",
+        kind: item.sender_id === currentUserIdRef.current ? "outgoing" : "incoming",
         senderId: item.sender_id,
         receiverId: item.receiver_id,
         text: item.message,
         createdAt: item.created_at,
+        deliveredAt: item.delivered_at || null,
+        readAt: item.read_at || null,
+        pending: false,
       }));
 
       const merged = [...preservedNonConversation];
@@ -214,12 +324,14 @@ export default function useChatApp() {
     });
   };
 
-  const loadUsers = async (tokenOverride = sessionToken) => {
+  const loadUsers = async (tokenOverride = sessionToken, options = {}) => {
     if (!tokenOverride) {
       return;
     }
 
-    setRefreshingUsers(true);
+    if (!options.quiet) {
+      setRefreshingUsers(true);
+    }
     try {
       const response = await fetch(`${httpBaseUrl}/chat/contacts`, {
         headers: {
@@ -228,7 +340,7 @@ export default function useChatApp() {
       });
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.detail || "Unable to load users.");
+        throw new Error(formatApiError(data, "Unable to load users."));
       }
 
       setAvailableUsers(data.friends || []);
@@ -247,20 +359,37 @@ export default function useChatApp() {
     } catch (requestError) {
       setError(requestError.message);
     } finally {
-      setRefreshingUsers(false);
+      if (!options.quiet) {
+        setRefreshingUsers(false);
+      }
     }
   };
 
-  const loadConversation = async (peerId) => {
-    if (!peerId || !sessionToken) {
+  const loadConversation = async (
+    peerId,
+    tokenOverride = sessionToken,
+    options = {},
+  ) => {
+    if (!peerId || !tokenOverride) {
       return;
     }
 
-    setHistoryLoading(true);
+    if (!options.quiet) {
+      setHistoryLoading(true);
+    }
     setError("");
     try {
-      const history = await authorizedFetch(`/chat/messages?peer_id=${peerId}`);
+      const response = await fetch(`${httpBaseUrl}/chat/messages?peer_id=${peerId}`, {
+        headers: {
+          Authorization: `Bearer ${tokenOverride}`,
+        },
+      });
+      const history = await response.json().catch(() => []);
+      if (!response.ok) {
+        throw new Error(formatApiError(history, "Unable to load messages."));
+      }
       mergeHistory(history);
+      await markConversationRead(peerId, tokenOverride);
       setUnreadCounts((currentCounts) => ({
         ...currentCounts,
         [peerId]: 0,
@@ -268,7 +397,43 @@ export default function useChatApp() {
     } catch (requestError) {
       setError(requestError.message);
     } finally {
-      setHistoryLoading(false);
+      if (!options.quiet) {
+        setHistoryLoading(false);
+      }
+    }
+  };
+
+  const markConversationRead = async (peerId, tokenOverride = sessionToken) => {
+    if (!peerId || !tokenOverride) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${httpBaseUrl}/chat/messages/read?peer_id=${peerId}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokenOverride}`,
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(formatApiError(data, "Unable to mark messages read."));
+      }
+      if (data.message_ids?.length) {
+        setMessages((currentMessages) =>
+          currentMessages.map((item) =>
+            data.message_ids.includes(item.id)
+              ? {
+                  ...item,
+                  deliveredAt: item.deliveredAt || data.read_at,
+                  readAt: data.read_at,
+                }
+              : item,
+          ),
+        );
+      }
+    } catch {
+      // Read receipts are best-effort; message loading should not fail because of them.
     }
   };
 
@@ -277,6 +442,49 @@ export default function useChatApp() {
       loadConversation(selectedUserId);
     }
   }, [selectedUserId]);
+
+  const refreshAppData = useCallback((options = {}) => {
+    if (!sessionTokenRef.current) {
+      return;
+    }
+
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+    }
+
+    refreshTimeoutRef.current = setTimeout(() => {
+      loadUsers(sessionTokenRef.current, options);
+      if (selectedUserIdRef.current) {
+        loadConversation(selectedUserIdRef.current, sessionTokenRef.current, {
+          quiet: true,
+        });
+      }
+    }, options.immediate ? 0 : 300);
+  }, [httpBaseUrl]);
+
+  useEffect(() => {
+    if (!sessionToken) {
+      return undefined;
+    }
+
+    const intervalId = setInterval(() => {
+      refreshAppData({ quiet: true });
+    }, 10000);
+
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        refreshAppData({ quiet: true, immediate: true });
+      }
+    });
+
+    return () => {
+      clearInterval(intervalId);
+      subscription.remove();
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+      }
+    };
+  }, [sessionToken, refreshAppData]);
 
   const sendFriendRequest = async (receiverId) => {
     try {
@@ -292,6 +500,7 @@ export default function useChatApp() {
         }),
       });
       await loadUsers();
+      refreshAppData({ quiet: true, immediate: true });
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -308,6 +517,7 @@ export default function useChatApp() {
       });
       await loadUsers();
       setSelectedUserId(userId);
+      refreshAppData({ quiet: true, immediate: true });
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -315,8 +525,33 @@ export default function useChatApp() {
     }
   };
 
+  const searchUsers = useCallback(async (query) => {
+    const cleanedQuery = query.trim().toLowerCase();
+    if (!cleanedQuery) {
+      setUserSearchResults([]);
+      return;
+    }
+
+    try {
+      setSearchingUsers(true);
+      setError("");
+      const results = await authorizedFetch(
+        `/chat/users/search?username=${encodeURIComponent(cleanedQuery)}`,
+      );
+      setUserSearchResults(results || []);
+    } catch (requestError) {
+      setUserSearchResults([]);
+      setError(requestError.message);
+    } finally {
+      setSearchingUsers(false);
+    }
+  }, [sessionToken, httpBaseUrl]);
+
   const handleAuth = async () => {
-    if (!email.trim()) {
+    const cleanedEmail = email.trim().toLowerCase();
+    const cleanedUsername = username.trim().toLowerCase();
+
+    if (!cleanedEmail) {
       setError("Enter your email address.");
       return;
     }
@@ -324,8 +559,16 @@ export default function useChatApp() {
       setError("Enter your password.");
       return;
     }
-    if (authMode === "signup" && !username.trim()) {
+    if (authMode === "signup" && !cleanedUsername) {
       setError("Choose a username.");
+      return;
+    }
+    if (authMode === "signup" && !USERNAME_PATTERN.test(cleanedUsername)) {
+      setError("Username must be 3-24 chars using lowercase letters, numbers, or underscores.");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
       return;
     }
 
@@ -341,13 +584,13 @@ export default function useChatApp() {
         body: JSON.stringify(
           authMode === "signup"
             ? {
-                email,
-                username,
+                email: cleanedEmail,
+                username: cleanedUsername,
                 password,
                 avatar_url: avatarUrl || null,
               }
             : {
-                email,
+                email: cleanedEmail,
                 password,
               },
         ),
@@ -355,7 +598,7 @@ export default function useChatApp() {
 
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.detail || "Unable to connect.");
+        throw new Error(formatApiError(data, "Unable to connect."));
       }
 
       setCurrentUser(data.user);
@@ -410,8 +653,10 @@ export default function useChatApp() {
       setIncomingRequests([]);
       setOutgoingRequests([]);
       setDiscoverableUsers([]);
+      setUserSearchResults([]);
       setSelectedUserId(null);
       setMessages([]);
+      setOnlineUserIds(new Set());
       setUnreadCounts({});
       setConnectionStatus("disconnected");
       setError("");
@@ -439,18 +684,23 @@ export default function useChatApp() {
 
     try {
       setError("");
-      chatSocket.sendMessage(selectedUserId, trimmedMessage);
+      const clientMessageId = `${Date.now()}-${Math.random()}`;
       setMessages((currentMessages) => [
         ...currentMessages,
         {
-          id: `${Date.now()}-${Math.random()}`,
+          id: clientMessageId,
+          clientMessageId,
           kind: "outgoing",
           senderId: currentUser.user_id,
           receiverId: selectedUserId,
           text: trimmedMessage,
           createdAt: new Date().toISOString(),
+          deliveredAt: null,
+          readAt: null,
+          pending: true,
         },
       ]);
+      chatSocket.sendMessage(selectedUserId, trimmedMessage, clientMessageId);
       setMessage("");
     } catch (socketError) {
       setError(socketError.message);
@@ -476,10 +726,13 @@ export default function useChatApp() {
     setMessage,
     currentUser,
     sessionToken,
+    messages,
     availableUsers,
     incomingRequests,
     outgoingRequests,
     discoverableUsers,
+    userSearchResults,
+    searchingUsers,
     selectedUserId,
     setSelectedUserId,
     selectedUser,
@@ -490,6 +743,7 @@ export default function useChatApp() {
     historyLoading,
     refreshingUsers,
     unreadCounts,
+    onlineUserIds,
     keyboardHeight,
     isPickingAvatar,
     friendActionKey,
@@ -499,6 +753,7 @@ export default function useChatApp() {
     clearAvatar,
     logout,
     loadUsers,
+    searchUsers,
     sendFriendRequest,
     acceptFriendRequest,
     sendMessage,

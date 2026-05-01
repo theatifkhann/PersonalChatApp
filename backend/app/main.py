@@ -15,7 +15,7 @@ from .db_models import Message, User
 from .models import ChatInboundMessage, ChatOutboundMessage
 from .security import get_user_for_token
 from .routes.auth import router as auth_router
-from .routes.chat import are_friends, router as chat_router
+from .routes.chat import accepted_friend_ids, are_friends, router as chat_router
 from .websocket import manager
 
 
@@ -57,11 +57,25 @@ def _serialize_message(message: Message) -> ChatOutboundMessage:
         message=message.body,
         created_at=message.created_at,
         delivered_at=message.delivered_at,
+        read_at=message.read_at,
     )
 
 
 def _message_payload(message: ChatOutboundMessage) -> dict[str, object]:
     return message.model_dump(mode="json")
+
+
+def _message_event_payload(
+    message: ChatOutboundMessage,
+    *,
+    event_type: str = "message",
+    client_message_id: str | None = None,
+) -> dict[str, object]:
+    return {
+        "type": event_type,
+        "client_message_id": client_message_id,
+        "message": _message_payload(message),
+    }
 
 
 def _store_message(
@@ -114,6 +128,23 @@ def _get_user_from_token(token: str | None) -> User | None:
         return get_user_for_token(db, token)
 
 
+def _get_friend_ids(user_id: int) -> set[int]:
+    with SessionLocal() as db:
+        return accepted_friend_ids(db, user_id)
+
+
+async def _broadcast_presence(user_id: int, online: bool) -> None:
+    friend_ids = _get_friend_ids(user_id)
+    await manager.send_to_many(
+        friend_ids,
+        {
+            "type": "presence",
+            "user_id": user_id,
+            "online": online,
+        },
+    )
+
+
 @app.get("/")
 def home() -> dict[str, object]:
     return {
@@ -146,8 +177,23 @@ async def chat(websocket: WebSocket, user_id: int, token: str | None = None) -> 
         return
 
     await manager.connect(user_id, websocket)
+    friend_ids = _get_friend_ids(user_id)
+    for friend_id in manager.connected_user_ids(friend_ids):
+        await websocket.send_json(
+            {
+                "type": "presence",
+                "user_id": friend_id,
+                "online": True,
+            }
+        )
+    await _broadcast_presence(user_id, True)
+
     for pending_message in _deliver_pending_messages(user_id):
-        await websocket.send_json(_message_payload(pending_message))
+        await websocket.send_json(_message_event_payload(pending_message))
+        await manager.send_to(
+            pending_message.sender_id,
+            _message_event_payload(pending_message, event_type="message_ack"),
+        )
 
     try:
         while True:
@@ -193,8 +239,16 @@ async def chat(websocket: WebSocket, user_id: int, token: str | None = None) -> 
                 )
                 outbound_message = _serialize_message(stored_message)
 
+            await websocket.send_json(
+                _message_event_payload(
+                    outbound_message,
+                    event_type="message_ack",
+                    client_message_id=message.client_message_id,
+                )
+            )
+
             if delivered:
-                await manager.send_to(message.receiver_id, _message_payload(outbound_message))
+                await manager.send_to(message.receiver_id, _message_event_payload(outbound_message))
 
             if not delivered:
                 await websocket.send_json(
@@ -207,3 +261,4 @@ async def chat(websocket: WebSocket, user_id: int, token: str | None = None) -> 
         pass
     finally:
         manager.disconnect(user_id)
+        await _broadcast_presence(user_id, False)

@@ -51,6 +51,11 @@ def _run_lightweight_migrations() -> None:
         return
 
     user_columns = {column["name"] for column in inspector.get_columns("users")}
+    message_columns = (
+        {column["name"] for column in inspector.get_columns("messages")}
+        if inspector.has_table("messages")
+        else set()
+    )
     migration_statements: list[str] = []
 
     if "email" not in user_columns:
@@ -62,6 +67,8 @@ def _run_lightweight_migrations() -> None:
     if "updated_at" not in user_columns:
         migration_statements.append("ALTER TABLE users ADD COLUMN updated_at TIMESTAMP")
         migration_statements.append("UPDATE users SET updated_at = created_at WHERE updated_at IS NULL")
+    if inspector.has_table("messages") and "read_at" not in message_columns:
+        migration_statements.append("ALTER TABLE messages ADD COLUMN read_at TIMESTAMP")
 
     with engine.begin() as connection:
         for statement in migration_statements:

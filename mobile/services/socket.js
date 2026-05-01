@@ -195,7 +195,7 @@ class ChatSocket {
     }
   }
 
-  sendMessage(receiverId, message) {
+  sendMessage(receiverId, message, clientMessageId = null) {
     if (!this.socket || this.socket.readyState !== 1) {
       throw new Error("Socket is not connected.");
     }
@@ -204,6 +204,7 @@ class ChatSocket {
       JSON.stringify({
         receiver_id: receiverId,
         message,
+        client_message_id: clientMessageId,
       }),
     );
   }
